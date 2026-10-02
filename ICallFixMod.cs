@@ -24,72 +24,19 @@ namespace CstiICallFix;
 ///        · 已实现的名字 → 返回真实现
 ///        · 其余        → 返回安全桩（返回 0，绝不 abort）
 ///      同时把拦到的名字登记到 icall_intercepted.txt（这就是权威的“真正缺失”清单）
+///
+/// [2026-10-02 22:2x 回归修复] 曾为「真机 ICall 取证」在成功路径上加过 NoteResolved()
+/// （Marshal.PtrToStringAnsi + ConcurrentDictionary 写），已**全部移除**：
+/// 它会在 il2cpp 启动引导期、对每一次成功解析（数千次、多线程）都做托管分配，
+/// 属于在原生 trampoline 里触发 GC/分配的高危操作 —— 实测导致 app 启动即死
+/// （死在 MiniLoader [STEP] 0 之前，最后日志全是“引擎未注册 ICall（已接管）”），
+/// 且连带把 MelonLoader 自己要用的 Scene::GetBuildIndexInternal 也打成未解析。
+/// 取证任务已完成，这段代码不再需要；探针源码保留在 AudioProbe.cs.disabled（不参与编译）。
 /// </summary>
 public class ICallFixMod : MelonMod
 {
     internal static readonly HashSet<string> Intercepted = new HashSet<string>();
     private static string _reportPath;
-
-    // ---- 只读取证扩展：记录**成功解析**的 ICall（名字去重、限量）----
-    // 目的：拿到「这个裁剪版引擎到底注册了哪些 ICall」的权威名单。
-    // 性能考量：il2cpp 生成的 wrapper 会把解析结果缓存进 static 变量，所以解析调用次数
-    // 有上界（≈ 被引用的 icall 数量，实测 1000+），这里再用 namePtr 去重，只有首次才 marshal 字符串。
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<IntPtr, byte> SeenOk =
-        new System.Collections.Concurrent.ConcurrentDictionary<IntPtr, byte>();
-    internal static readonly System.Collections.Concurrent.ConcurrentDictionary<string, IntPtr> Resolved =
-        new System.Collections.Concurrent.ConcurrentDictionary<string, IntPtr>();
-
-    /// <summary>仅记录，不改行为。返回 true 表示这次是新的名字。</summary>
-    internal static void NoteResolved(IntPtr namePtr, IntPtr fp)
-    {
-        try
-        {
-            if (SeenOk.Count > 20000) return;
-            if (!SeenOk.TryAdd(namePtr, 0)) return;
-            var n = Marshal.PtrToStringAnsi(namePtr);
-            if (string.IsNullOrEmpty(n)) return;
-            if (Resolved.Count > 20000) return;
-            Resolved.TryAdd(n, fp);
-            if (n.IndexOf("Audio", StringComparison.Ordinal) >= 0 ||
-                n.IndexOf("Sound", StringComparison.Ordinal) >= 0 ||
-                n.IndexOf("Microphone", StringComparison.Ordinal) >= 0)
-                MelonLoader.MelonLogger.Msg("[ICALLFIX] 已注册(命中) " + n + " = 0x" + fp.ToInt64().ToString("X"));
-        }
-        catch { }
-    }
-
-    public static void DumpResolved()
-    {
-        try
-        {
-            var dir = Path.Combine("/sdcard/MelonLoader", "com.winterspringgames.survivaljourney");
-            Directory.CreateDirectory(dir);
-            var all = new List<string>(Resolved.Keys);
-            all.Sort(StringComparer.Ordinal);
-            var sbAll = new StringBuilder();
-            sbAll.AppendLine("# 本次运行中**成功解析**的 ICall 去重清单: " + all.Count);
-            foreach (var n in all) sbAll.AppendLine(n);
-            File.WriteAllText(Path.Combine(dir, "icall_resolved_all.txt"), sbAll.ToString());
-
-            var sbA = new StringBuilder();
-            var audio = all.FindAll(n => n.IndexOf("Audio", StringComparison.Ordinal) >= 0
-                                      || n.IndexOf("Sound", StringComparison.Ordinal) >= 0
-                                      || n.IndexOf("Microphone", StringComparison.Ordinal) >= 0);
-            sbA.AppendLine("# 音频相关：成功解析的 ICall (" + audio.Count + ")");
-            foreach (var n in audio) sbA.AppendLine(n + "  = 0x" + Resolved[n].ToInt64().ToString("X"));
-            sbA.AppendLine();
-            sbA.AppendLine("# 对照：本轮被拦下（未注册）的音频相关 ICall");
-            foreach (var n in Intercepted)
-                if (n.IndexOf("Audio", StringComparison.Ordinal) >= 0 || n.IndexOf("Sound", StringComparison.Ordinal) >= 0)
-                    sbA.AppendLine(n);
-            File.WriteAllText(Path.Combine(dir, "icall_resolved_audio.txt"), sbA.ToString());
-            MelonLoader.MelonLogger.Msg("[ICALLFIX] 解析清单已写入: 成功 " + all.Count + " 条（音频 " + audio.Count + "）");
-        }
-        catch (Exception e)
-        {
-            MelonLoader.MelonLogger.Warning("[ICALLFIX] DumpResolved 失败: " + e.Message);
-        }
-    }
 
     public override void OnInitializeMelon()
     {
@@ -100,9 +47,6 @@ public class ICallFixMod : MelonMod
             bool ok = ResolverHook.Install();
             LoggerInstance.Msg("[ICALLFIX] resolver detour 安装 " + (ok ? "成功" : "失败")
                                + "  已实现 shim 数 = " + RealShims.Count);
-            // 真机一次性音频取证（三重触发，见 AudioProbe）
-            AudioProbe.StartBackground(20000);
-            LoggerInstance.Msg("[ICALLFIX] AudioProbe 后台线程已启动（20s 后跑）");
         }
         catch (Exception e)
         {
@@ -110,26 +54,17 @@ public class ICallFixMod : MelonMod
         }
     }
 
-    public override void OnApplicationQuit()
-    {
-        AudioProbe.Run("OnApplicationQuit");
-        DumpIntercepted();
-        DumpResolved();
-    }
+    public override void OnApplicationQuit() => DumpIntercepted();
 
     private float _nextDump;
-    private float _probeAt = -1f;
 
     public override void OnUpdate()
     {
         // OnUpdate 泵可能不可用，这里只在可用时周期性落盘；不可用时由 OnApplicationQuit 兜底
         float t = UnityEngine.Time.realtimeSinceStartup;
-        if (_probeAt < 0f) _probeAt = t + 15f;           // AudioProbe 的第二重触发
-        if (t >= _probeAt) { _probeAt = float.MaxValue; AudioProbe.Run("OnUpdate"); }
         if (t - _nextDump < 5f) return;
         _nextDump = t;
         DumpIntercepted();
-        DumpResolved();
     }
 
     internal static void DumpIntercepted()
@@ -195,11 +130,7 @@ public static class ResolverHook
         try
         {
             IntPtr result = _original != null ? _original(namePtr) : IntPtr.Zero;
-            if (result != IntPtr.Zero)
-            {
-                ICallFixMod.NoteResolved(namePtr, result);   // 只记录，不改行为
-                return result;
-            }
+            if (result != IntPtr.Zero) return result;
 
             var name = Marshal.PtrToStringAnsi(namePtr);
             if (!string.IsNullOrEmpty(name) && ICallFixMod.Intercepted.Add(name))

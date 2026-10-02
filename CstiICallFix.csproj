@@ -17,7 +17,6 @@
     <Reference Include="UnityEngine.CoreModule"><HintPath>$(ML06)\interop_out\UnityEngine.CoreModule.dll</HintPath></Reference>
     <Reference Include="UnityEngine.AssetBundleModule"><HintPath>$(ML06)\interop_out\UnityEngine.AssetBundleModule.dll</HintPath></Reference>
     <Reference Include="UnityEngine.ImageConversionModule"><HintPath>$(ML06)\interop_out\UnityEngine.ImageConversionModule.dll</HintPath></Reference>
-    <Reference Include="UnityEngine.AudioModule"><HintPath>$(ML06)\interop_out\UnityEngine.AudioModule.dll</HintPath></Reference>
   </ItemGroup>
   <ItemGroup>
     <EmbeddedResource Include="icall_inventory.txt" />
@@ -27,6 +26,7 @@
     <Reference Include="Il2Cppmscorlib"><HintPath>$(ML06)\interop_out\Il2Cppmscorlib.dll</HintPath></Reference>
   </ItemGroup>
 </Project>
+
 
 
 
