@@ -1,0 +1,11 @@
+bin/
+obj/
+userlibs/
+*.dll
+*.so
+*.pdb
+*.log
+*.apk
+.vs/
+.idea/
+
